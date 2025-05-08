@@ -1238,6 +1238,8 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	}
 
 	if (tun_up) {
+		/* Re-prepare the script environment in case some details changes in reconnect that we want to re-handle in the script */
+		prepare_script_env(vpninfo);
 		script_config_tun(vpninfo, "reconnect");
 		if (vpninfo->reconnected)
 			vpninfo->reconnected(vpninfo->cbdata);
