@@ -306,7 +306,7 @@ int ssl_nonblock_read(struct openconnect_info *vpninfo, int dtls, void *buf, int
 	if (ret > 0)
 		return ret;
 
-	if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED)
+	if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_SUCCESS)
 		return 0;
 
 	vpn_progress(vpninfo, PRG_ERR, _("Read error on %s session: %s\n"),
@@ -355,8 +355,8 @@ int ssl_nonblock_write(struct openconnect_info *vpninfo, int dtls, void *buf, in
 		return 0;
 	}
 
-	vpn_progress(vpninfo, PRG_ERR, _("Write error on %s session: %s\n"),
-		     dtls ? "DTLS" : "SSL", gnutls_strerror(ret));
+	vpn_progress(vpninfo, PRG_ERR, _("Write error on %s session: %s (%d)\n"),
+		     dtls ? "DTLS" : "SSL", gnutls_strerror(ret), ret);
 	return -1;
 }
 

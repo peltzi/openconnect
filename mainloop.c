@@ -303,8 +303,8 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 		if (did_work)
 			continue;
 
-		vpn_progress(vpninfo, PRG_TRACE,
-			     _("No work to do; sleeping for %d ms...\n"), timeout);
+		/* vpn_progress(vpninfo, PRG_TRACE,
+			     _("No work to do; sleeping for %d ms...\n"), timeout); */
 
 #ifdef _WIN32
 		if (vpninfo->dtls_monitored) {

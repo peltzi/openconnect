@@ -19,6 +19,7 @@
 
 #include "openconnect-internal.h"
 
+#include "openconnect.h"
 #include "ppp.h"
 
 #include <libxml/HTMLparser.h>
@@ -490,7 +491,7 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
 			for (x = xml_node->children; x; x=x->next) {
 				if (xmlnode_is_named(x, "assigned-addr") && !xmlnode_get_prop(x, "ipv4", &s)) {
 					vpn_progress(vpninfo, PRG_INFO, _("Got Legacy IP address %s\n"), s);
-					new_ip_info.addr = add_option_steal(&new_opts, "ipaddr", &s);
+					new_ip_info.addr = strdup(add_option_steal(&new_opts, "ipaddr", &s));
 				} else if (xmlnode_is_named(x, "dns")) {
 					if (!xmlnode_get_prop(x, "domain", &s) && s && *s) {
 						vpn_progress(vpninfo, PRG_INFO, _("Got search domain %s\n"), s);
@@ -529,12 +530,12 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
 						}
 						vpn_progress(vpninfo, PRG_INFO, _("Got IPv6 address %s\n"), a);
 						if (!vpninfo->disable_ipv6)
-							new_ip_info.netmask6 = add_option_steal(&new_opts, "ipaddr6", &a);
+							new_ip_info.netmask6 = strdup(add_option_steal(&new_opts, "ipaddr6", &a));
 						free(a);
 					} else {
 						vpn_progress(vpninfo, PRG_INFO, _("Got IPv6 address %s\n"), s);
 						if (!vpninfo->disable_ipv6)
-							new_ip_info.addr6 = add_option_steal(&new_opts, "ipaddr6", &s);
+							new_ip_info.addr6 = strdup(add_option_steal(&new_opts, "ipaddr6", &s));
 					}
 				} else if (xmlnode_is_named(x, "dns")) {
 					if (!xmlnode_get_prop(x, "domain", &s) && s && *s) {
@@ -586,7 +587,7 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
 			vpn_progress(vpninfo, PRG_INFO, _("Received split routes; not setting default Legacy IP route\n"));
 		else {
 			vpn_progress(vpninfo, PRG_INFO, _("No split routes received; setting default Legacy IP route\n"));
-			new_ip_info.netmask = add_option_dup(&new_opts, "full-netmask", "0.0.0.0", -1);
+			new_ip_info.netmask = strdup(add_option_dup(&new_opts, "full-netmask", "0.0.0.0", -1));
 		}
 	}
 	if (buf_error(domains) == 0 && domains->pos > 0) {
@@ -639,6 +640,34 @@ static int fortinet_configure(struct openconnect_info *vpninfo)
 			return ret;
 	}
 
+	vpn_progress(vpninfo, PRG_INFO, _("Configuring Fortinet VPN connection\n"));
+
+	/* Skip connection option re-fetching if our state is still valid looking  */
+	if (vpninfo->ip_info.addr && (time(NULL) < vpninfo->auth_expiration)) {
+	    vpn_progress(vpninfo, PRG_INFO, _("Legacy IP address is set and auth-expiration not passed, reconnect attempt.\n"));
+
+		openconnect_close_https(vpninfo, 0);
+
+		free(vpninfo->ip_info.addr);
+		vpninfo->ip_info.addr = NULL;
+		free(vpninfo->ip_info.netmask);
+		vpninfo->ip_info.netmask = NULL;
+		free(vpninfo->ip_info.addr6);
+		vpninfo->ip_info.addr6 = NULL;
+		free(vpninfo->ip_info.netmask6);
+		vpninfo->ip_info.netmask6 = NULL;
+
+		/* free(vpninfo->urlpath);
+		vpninfo->urlpath = strdup("remote/fortisslvpn");
+		int reconret = do_https_request(vpninfo, "GET", NULL, NULL, &res_buf, NULL, HTTP_NO_FLAGS);
+
+		if (reconret < 0) {
+            vpn_progress(vpninfo, PRG_ERR, _("Reconnect check connection failed\n"));
+            goto out;
+		} */
+
+	    /* goto build_connection; */
+	}
 	/* Fetch the connection options in XML format */
 	free(vpninfo->urlpath);
 	if (asprintf(&vpninfo->urlpath, "remote/fortisslvpn_xml%s", vpninfo->disable_ipv6 ? "" : "?dual_stack=1") < 0) {
@@ -693,6 +722,8 @@ static int fortinet_configure(struct openconnect_info *vpninfo)
 	ret = parse_fortinet_xml_config(vpninfo, res_buf, ret);
 	if (ret)
 		goto out;
+
+/* build_connection: */
 
 	/* Build TLS connection request (looks like HTTP GET, but acts as HTTP CONNECT) */
 	reqbuf = vpninfo->ppp_tls_connect_req;

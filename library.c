@@ -530,7 +530,7 @@ int install_vpn_opts(struct openconnect_info *vpninfo, struct oc_vpn_option *opt
 				     _("Reconnect gave different Legacy IP address (%s != %s)\n"),
 				     ip_info->addr, vpninfo->ip_info.addr);
 			/* EPERM means that the retry loop will abort and won't keep trying. */
-			return -EPERM;
+			/* return -EPERM; */
 		}
 	}
 	if (vpninfo->ip_info.netmask) {

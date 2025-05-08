@@ -110,7 +110,7 @@ static int process_attr(struct openconnect_info *vpninfo,
 		snprintf(buf, sizeof(buf), "%d.%d.%d.%d", data[0], data[1], data[2], data[3]);
 
 		vpn_progress(vpninfo, PRG_DEBUG, _("Received internal IP address %s\n"), buf);
-		new_ip_info->addr = add_option_dup(new_opts, "ipaddr", buf, -1);
+		new_ip_info->addr = strdup(add_option_dup(new_opts, "ipaddr", buf, -1));
 		break;
 
 	case GRP_ATTR(1, 2):
@@ -119,7 +119,7 @@ static int process_attr(struct openconnect_info *vpninfo,
 		snprintf(buf, sizeof(buf), "%d.%d.%d.%d", data[0], data[1], data[2], data[3]);
 
 		vpn_progress(vpninfo, PRG_DEBUG, _("Received netmask %s\n"), buf);
-		new_ip_info->netmask = add_option_dup(new_opts, "netmask", buf, -1);
+		new_ip_info->netmask = strdup(add_option_dup(new_opts, "netmask", buf, -1));
 		break;
 
 	case GRP_ATTR(1, 3):
