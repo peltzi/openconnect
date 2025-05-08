@@ -19,6 +19,7 @@
 
 #include "openconnect-internal.h"
 
+#include "openconnect.h"
 #include "ppp.h"
 
 #include <libxml/HTMLparser.h>
@@ -637,6 +638,20 @@ static int fortinet_configure(struct openconnect_info *vpninfo)
 		ret = internal_split_cookies(vpninfo, 1, "SVPNCOOKIE");
 		if (ret)
 			return ret;
+	}
+
+	vpn_progress(vpninfo, PRG_INFO, _("Configuring Fortinet VPN connection\n"));
+
+	if (vpninfo->ip_info.addr && (time(NULL) < vpninfo->auth_expiration)) {
+		vpn_progress(vpninfo, PRG_INFO, _("Legacy IP address is set and auth-expiration not passed, reconnect attempt.\n"));
+
+		/* Close HTTPS connection here to ensure clean reconnect */
+		openconnect_close_https(vpninfo, 0);
+
+		/* Clear IP information to account for legacy IP address changes */
+		free(vpninfo->ip_info.gateway_addr);
+		struct oc_ip_info clear_ip_info = {};
+		vpninfo->ip_info = clear_ip_info;
 	}
 
 	/* Fetch the connection options in XML format */
