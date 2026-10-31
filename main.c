@@ -1053,6 +1053,7 @@ static void usage(void)
 
 	printf("\n%s:\n", _("Internet connectivity"));
 	printf("      --server=SERVER             %s\n", _("Set VPN server"));
+	printf("                                  %s\n", _("(Fortinet: comma-separated list picks lowest latency)"));
 	printf("  -P, --proxy=URL                 %s\n", _("Set proxy server"));
 	printf("      --proxy-auth=METHODS        %s\n", _("Set proxy authentication methods"));
 	printf("      --no-proxy                  %s\n", _("Disable proxy"));
@@ -2371,6 +2372,18 @@ int main(int argc, char *argv[])
 
 	if (config_lookup_host(vpninfo, server_url))
 		exit(1);
+
+	/* A comma-separated list of headends: pick the one with the lowest
+	 * TCP connect latency. This happens once; reconnects stay on the
+	 * chosen server since the cookie is only valid there. */
+	if (!vpninfo->hostname && strchr(server_url, ',')) {
+		if (strcmp(openconnect_get_protocol(vpninfo), "fortinet")) {
+			fprintf(stderr, _("Multiple servers are only supported with --protocol=fortinet\n"));
+			exit(1);
+		}
+		if (openconnect_select_fastest_server(vpninfo, server_url))
+			exit(1);
+	}
 
 	/* If config_lookup_host() didn't set it, it'd better be a URL */
 	if (!vpninfo->hostname) {

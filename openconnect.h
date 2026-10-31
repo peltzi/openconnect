@@ -674,6 +674,10 @@ int openconnect_disable_ipv6(struct openconnect_info *vpninfo);
 int openconnect_disable_dtls(struct openconnect_info *vpninfo);
 void openconnect_reset_ssl(struct openconnect_info *vpninfo);
 int openconnect_parse_url(struct openconnect_info *vpninfo, const char *url);
+/* Takes a comma-separated list of server URLs, picks the one with the lowest
+ * TCP connect latency and sets it as with openconnect_parse_url(). */
+int openconnect_select_fastest_server(struct openconnect_info *vpninfo,
+				      const char *server_list);
 void openconnect_set_cert_expiry_warning(struct openconnect_info *vpninfo,
 					 int seconds);
 void openconnect_set_pfs(struct openconnect_info *vpninfo, unsigned val);

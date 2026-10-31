@@ -262,6 +262,288 @@ static int set_tcp_nodelay(struct openconnect_info *vpninfo, int ssl_sock)
 }
 
 
+struct server_probe {
+	int fd;
+	int idx;
+	socklen_t addrlen;
+	struct sockaddr_storage addr;
+};
+
+#define SERVER_PROBE_TIMEOUT_MS 5000
+
+/* Given a comma-separated list of server URLs, race TCP connections to
+ * every address of every server and select the one whose handshake
+ * completes first (i.e. lowest TCP connect latency from here). The
+ * winner is then set as the server URL, and its address is pinned as
+ * the peer address so the real connection goes to the same endpoint.
+ *
+ * If a proxy is in use the probe is meaningless, so the first server
+ * in the list is used. If no server answers, also fall back to the
+ * first one and let the normal connection logic report the error. */
+int openconnect_select_fastest_server(struct openconnect_info *vpninfo,
+				      const char *server_list)
+{
+	char *list, *p, *tok, **urls = NULL;
+	struct server_probe *probes = NULL;
+	int nr_urls = 0, nr_probes = 0, i, winner = -1, ret;
+	struct server_probe *won = NULL;
+	struct addrinfo **results = NULL;
+	struct timeval start_tv, now_tv;
+
+	UTF8CHECK(server_list);
+
+	list = strdup(server_list);
+	if (!list)
+		return -ENOMEM;
+
+	for (tok = list; tok; tok = p) {
+		char **new_urls;
+
+		p = strchr(tok, ',');
+		if (p)
+			*p++ = 0;
+		while (*tok == ' ')
+			tok++;
+		if (!*tok)
+			continue;
+		new_urls = realloc(urls, sizeof(*urls) * (nr_urls + 1));
+		if (!new_urls) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		urls = new_urls;
+		urls[nr_urls++] = tok;
+	}
+
+	if (!nr_urls) {
+		vpn_progress(vpninfo, PRG_ERR, _("Empty server list\n"));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (nr_urls == 1 || vpninfo->proxy || vpninfo->proxy_factory) {
+		if (nr_urls > 1)
+			vpn_progress(vpninfo, PRG_INFO,
+				     _("Proxy in use; not probing servers, using first: %s\n"),
+				     urls[0]);
+		ret = openconnect_parse_url(vpninfo, urls[0]);
+		goto out;
+	}
+
+	/* Resolve everything up front so DNS time doesn't skew the race */
+	results = calloc(nr_urls, sizeof(*results));
+	if (!results) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	for (i = 0; i < nr_urls; i++) {
+		struct addrinfo hints;
+		char *host = NULL;
+		char port_str[6];
+		int port, err;
+		size_t len;
+
+		if (internal_parse_url(urls[i], NULL, &host, &port, NULL, 443)) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to parse server URL '%s'\n"), urls[i]);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		memset(&hints, 0, sizeof(hints));
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_flags = AI_NUMERICSERV;
+		snprintf(port_str, sizeof(port_str), "%d", port);
+
+		len = strlen(host);
+		if (len > 2 && host[0] == '[' && host[len - 1] == ']') {
+			memmove(host, host + 1, len - 2);
+			host[len - 2] = 0;
+			hints.ai_flags |= AI_NUMERICHOST;
+		}
+
+		if (vpninfo->getaddrinfo_override)
+			err = vpninfo->getaddrinfo_override(vpninfo->cbdata, host, port_str, &hints, &results[i]);
+		else
+			err = getaddrinfo(host, port_str, &hints, &results[i]);
+		if (err) {
+			vpn_progress(vpninfo, PRG_INFO,
+				     _("Server probe: cannot resolve '%s', skipping\n"), host);
+			results[i] = NULL;
+		}
+		free(host);
+	}
+
+	gettimeofday(&start_tv, NULL);
+
+	for (i = 0; i < nr_urls; i++) {
+		struct addrinfo *rp;
+
+		for (rp = results[i]; rp; rp = rp->ai_next) {
+			struct server_probe *new_probes, *pr;
+			int fd;
+
+			if (rp->ai_addrlen > sizeof(struct sockaddr_storage))
+				continue;
+
+			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+			if (fd < 0)
+				continue;
+			set_fd_cloexec(fd);
+			if (set_sock_nonblock(fd)) {
+				closesocket(fd);
+				continue;
+			}
+			if (vpninfo->protect_socket)
+				vpninfo->protect_socket(vpninfo->cbdata, fd);
+
+			if (connect(fd, rp->ai_addr, rp->ai_addrlen) < 0 && !connect_pending()) {
+				closesocket(fd);
+				continue;
+			}
+#ifndef _WIN32
+			if (fd >= FD_SETSIZE) {
+				closesocket(fd);
+				continue;
+			}
+#endif
+			new_probes = realloc(probes, sizeof(*probes) * (nr_probes + 1));
+			if (!new_probes) {
+				closesocket(fd);
+				ret = -ENOMEM;
+				goto out;
+			}
+			probes = new_probes;
+			pr = &probes[nr_probes++];
+			pr->fd = fd;
+			pr->idx = i;
+			pr->addrlen = rp->ai_addrlen;
+			memcpy(&pr->addr, rp->ai_addr, rp->ai_addrlen);
+		}
+	}
+
+	while (!won) {
+		fd_set rd_set, wr_set, ex_set;
+		struct timeval tv;
+		long elapsed_ms;
+		int maxfd = -1, live = 0;
+
+		FD_ZERO(&rd_set);
+		FD_ZERO(&wr_set);
+		FD_ZERO(&ex_set);
+		for (i = 0; i < nr_probes; i++) {
+			if (probes[i].fd < 0)
+				continue;
+			FD_SET(probes[i].fd, &wr_set);
+#ifdef _WIN32 /* Windows indicates failure this way, not in wr_set */
+			FD_SET(probes[i].fd, &ex_set);
+#endif
+			if (probes[i].fd > maxfd)
+				maxfd = probes[i].fd;
+			live++;
+		}
+		if (!live)
+			break;
+
+		gettimeofday(&now_tv, NULL);
+		elapsed_ms = (now_tv.tv_sec - start_tv.tv_sec) * 1000 +
+			(now_tv.tv_usec - start_tv.tv_usec) / 1000;
+		if (elapsed_ms >= SERVER_PROBE_TIMEOUT_MS)
+			break;
+		tv.tv_sec = (SERVER_PROBE_TIMEOUT_MS - elapsed_ms) / 1000;
+		tv.tv_usec = ((SERVER_PROBE_TIMEOUT_MS - elapsed_ms) % 1000) * 1000;
+
+		cmd_fd_set(vpninfo, &rd_set, &maxfd);
+		if (select(maxfd + 1, &rd_set, &wr_set, &ex_set, &tv) < 0) {
+			if (errno == EINTR)
+				continue;
+			vpn_perror(vpninfo, _("Failed select() for server probe"));
+			ret = -EIO;
+			goto out;
+		}
+		if (is_cancel_pending(vpninfo, &rd_set)) {
+			vpn_progress(vpninfo, PRG_ERR, _("Server probe cancelled\n"));
+			ret = -EINTR;
+			goto out;
+		}
+
+		for (i = 0; i < nr_probes; i++) {
+			struct sockaddr_storage peer;
+			socklen_t peerlen = sizeof(peer);
+			int fd = probes[i].fd;
+
+			if (fd < 0 || (!FD_ISSET(fd, &wr_set) && !FD_ISSET(fd, &ex_set)))
+				continue;
+
+			/* See cancellable_connect() for why getpeername() */
+			if (!won && !getpeername(fd, (void *)&peer, &peerlen))
+				won = &probes[i];
+			closesocket(fd);
+			probes[i].fd = -1;
+		}
+	}
+
+	if (won) {
+		char host[80];
+		long rtt_ms;
+
+		gettimeofday(&now_tv, NULL);
+		rtt_ms = (now_tv.tv_sec - start_tv.tv_sec) * 1000 +
+			(now_tv.tv_usec - start_tv.tv_usec) / 1000;
+		winner = won->idx;
+
+		host[0] = 0;
+		getnameinfo((void *)&won->addr, won->addrlen, host, sizeof(host),
+			    NULL, 0, NI_NUMERICHOST);
+		vpn_progress(vpninfo, PRG_INFO,
+			     _("Selected server %s (%s) with TCP connect time %ld ms\n"),
+			     urls[winner], host, rtt_ms);
+	} else {
+		winner = 0;
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("No server responded to probe; trying first: %s\n"),
+			     urls[0]);
+	}
+
+	ret = openconnect_parse_url(vpninfo, urls[winner]);
+	if (ret || !won)
+		goto out;
+
+	/* Pin the address that answered fastest, mirroring what
+	 * connect_https_socket() records after a successful connect. */
+	vpninfo->peer_addr = malloc(won->addrlen);
+	if (vpninfo->peer_addr) {
+		char host[80];
+
+		vpninfo->peer_addrlen = won->addrlen;
+		memcpy(vpninfo->peer_addr, &won->addr, won->addrlen);
+		if (!getnameinfo(vpninfo->peer_addr, won->addrlen, host,
+				 sizeof(host), NULL, 0, NI_NUMERICHOST)) {
+			vpninfo->ip_info.gateway_addr = strdup(host);
+			if (asprintf(&vpninfo->unique_hostname,
+				     vpninfo->peer_addr->sa_family == AF_INET6 ? "[%s]" : "%s",
+				     host) < 0)
+				vpninfo->unique_hostname = NULL;
+		}
+	}
+
+ out:
+	for (i = 0; i < nr_probes; i++)
+		if (probes[i].fd >= 0)
+			closesocket(probes[i].fd);
+	free(probes);
+	if (results) {
+		for (i = 0; i < nr_urls; i++)
+			if (results[i])
+				freeaddrinfo(results[i]);
+		free(results);
+	}
+	free(urls);
+	free(list);
+	return ret;
+}
+
 int connect_https_socket(struct openconnect_info *vpninfo)
 {
 	int ssl_sock = -1;

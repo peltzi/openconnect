@@ -482,6 +482,15 @@ and it may equivalently be specified with
 .BR \-\-usergroup .
 
 As an alternative, define the VPN server as non-option command line argument.
+
+With
+.BR \-\-protocol=fortinet ,
+a comma-separated list of servers may be given. OpenConnect starts TCP
+connections to every address of every server at the same time and uses
+the server that answers first. The choice is made once at startup;
+reconnections stay on the selected server because the session cookie is
+only valid there. When a proxy is in use, no probing is done and the
+first server is used.
 .TAG opt-user
 .TP
 .B \-u,\-\-user=NAME
